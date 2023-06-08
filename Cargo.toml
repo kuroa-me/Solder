@@ -1,0 +1,20 @@
+[package]
+name = "solder"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "rotten_potato"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tosser"
+path = "src/bin.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tokio-splice = { version = "0.2.0" }
+listenfd = { version = "1.0.1" }
+libc = { version = "0.2" }
