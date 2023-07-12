@@ -6,8 +6,12 @@ use std::io::{self, IoSliceMut};
 use std::mem::{size_of, zeroed};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::os::fd::AsRawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     let listen_addr: SocketAddr = env::args()
         .nth(1)
         .unwrap_or_else(|| "0.0.0.0:8080".to_string())
@@ -42,11 +46,22 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut ancillary_buffer = [0; 128];
     let mut ancillary = SocketAncillary::new(&mut ancillary_buffer[..]);
 
+    let counter = Arc::new(AtomicU64::new(0));
+    let mut reg = Registry::new(Arc::clone(&counter));
+    tokio::task::spawn(async move {
+        loop {
+            reg.tick();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+
     loop {
-        let (size, _truncated, sender) =
+        let (size, _truncated, _sender) =
             recv_vectored_with_ancillary_from(&sock, &mut bufs, &mut ancillary)?;
 
-        println!("Received {} bytes from {:?}", size, sender);
+        // println!("Received {} bytes from {:?}", size, _sender);
+
+        counter.fetch_add(size as u64, Ordering::Relaxed);
 
         //     let (len, addr) = sock.recv_from(&mut buf)?;
         //     println!("{:?} bytes received from {:?}", len, addr);
@@ -78,7 +93,9 @@ fn recv_vectored_with_ancillary_from(
         let count = cvt(libc::recvmsg(
             socket.as_raw_fd(),
             &mut msg as *mut _,
+            //TODO: Make this non-blocking
             libc::MSG_TRUNC,
+            // libc::MSG_TRUNC | libc::MSG_DONTWAIT,
         ))?;
 
         ancillary.length = msg.msg_controllen as usize;
@@ -92,8 +109,8 @@ fn recv_vectored_with_ancillary_from(
         while !cmsg.is_null() {
             if (*cmsg).cmsg_level == libc::SOL_UDP && (*cmsg).cmsg_type == libc::UDP_GRO {
                 let grosizeptr = libc::CMSG_DATA(cmsg);
-                let grosize = *grosizeptr as u16;
-                println!("grosize: {}", grosize);
+                let _grosize = *(grosizeptr as *mut u16);
+                // print!("grosize: {} ", _grosize);
             }
             cmsg = libc::CMSG_NXTHDR(&msg, cmsg);
         }
@@ -122,6 +139,49 @@ pub fn from_parts(addr: libc::sockaddr_storage, len: libc::socklen_t) -> io::Res
             io::ErrorKind::InvalidInput,
             "invalid sockaddr",
         )),
+    }
+}
+
+struct Registry {
+    previous: u64,
+    delta: u64,
+    now: SystemTime,
+    time_elapsed: Duration,
+    counter: Arc<AtomicU64>,
+}
+
+impl Registry {
+    fn new(counter: Arc<AtomicU64>) -> Self {
+        Registry {
+            previous: 0,
+            delta: 0,
+            now: SystemTime::now(),
+            time_elapsed: Duration::new(0, 0),
+            counter,
+        }
+    }
+
+    fn update(&mut self) {
+        let current = self.counter.load(Ordering::Relaxed);
+        self.delta = current - self.previous;
+        self.previous = current;
+        self.time_elapsed = self.now.elapsed().unwrap();
+        self.now = SystemTime::now();
+    }
+
+    fn get_rate(&self) -> u64 {
+        let delta = self.delta;
+        let time_elapsed = self.time_elapsed.as_secs();
+        // avoid division by zero
+        if time_elapsed == 0 {
+            return 0;
+        }
+        delta / time_elapsed
+    }
+
+    fn tick(&mut self) {
+        self.update();
+        println!("Rate: {}", self.get_rate());
     }
 }
 
